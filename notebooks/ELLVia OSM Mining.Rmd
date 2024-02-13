@@ -1,0 +1,378 @@
+---
+title: "OSM Mining"
+author: "Kate Lyons"
+date: "9/13/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Getting data from Open Street Map! 
+
+Open Street Map (OSM) is an open source data base of a TON of spatial data. We're going to use it to get shape files of the different Vienna districts we've collected data on. We'll use the [osmdata](https://github.com/ropensci/osmdata) library to access OSM's Overpass API.
+
+See LL survey areas [here](https://www.google.com/maps/d/u/0/edit?mid=11PGdR_KN4RS52y3d71QgWdsOeDcl_6aS&ll=48.20932199596231%2C16.342377515237057&z=15).
+
+```{r Libraries}
+library(ggplot2)
+library(sf)
+library(osmdata)
+library(osmar)
+library(prettymapr)
+library(tidyverse)
+library(sp)
+library(ggmap)
+library(splancs)
+library(rgeos)
+library(rgdal)
+library(tmap)
+library(geojsonR)
+library(plyr)
+
+# Set API key for ggmap
+register_google(key = "AIzaSyCTlb6z8LgAxNrx6565KuSoUm1HogxkmKE")
+
+# Load test data for filtering
+load("/Users/katelyons/Documents/ELLViA/Data/1st District/instaOnlyinnere.RData")
+
+load("/Users/katelyons/Documents/ELLViA/Data/8th District/eighthDistrictInsta.RData")
+
+load("~/Documents/ELLViA/Data/16th District/ottarkring.RData")
+
+load("/Users/katelyons/Documents/ELLViA/Data/18th District/währing.RData")
+
+load("/Users/katelyons/Documents/ELLViA/Data/19th District/döbling.RData")
+
+load("/Users/katelyons/Documents/ELLViA/Data/21st District/instaOnly21.RData")
+
+instaData <- list(instaOnlyinnere, eighthDistrictInsta, ottarkring, währing, döbling, instaOnly21)
+```
+
+## Getting boundaries
+
+Going to use the OSM API to grab spatial data on the region and subset to the specific district we want using the OSM ID field. Help on this from [here](https://altran-data-analytics.netlify.app/2017/10/10/2017-10-10-creating-maps-with-r-and-openstreetmap/).
+
+The method of retrival / processing depends on if they have the ability to be converted to an sf object. If the district is in OSM as a boundary object, we can grab the polygon directly, if it's just there as a bounding box, we have to covert ourselves another way. 
+
+```{r Get boundaries in simple format polygon}
+# Get boundaries for specific region
+# JosefstadtBoundaries <- opq(bbox = 'Josefstadt Wien')
+
+# Start at the admin level!
+wien9Boundaries <- opq(bbox = 'Wien Austria') %>%
+  add_osm_feature(key = 'admin_level', value = '9') %>% 
+  osmdata_sf %>% unique_osmdata
+
+# Might not need this:
+# wien10Boundaries <- opq(bbox = 'Wien Austria') %>%
+#   add_osm_feature(key = 'admin_level', value = '10') %>% 
+#   osmdata_sf %>% unique_osmdata
+
+# Subset to area of interest for testing
+# innerePoly <- wien10Boundaries$osm_multipolygons %>% filter(osm_id == '5264583')
+
+innerePoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1990592')
+
+josefstadtPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1990593')
+
+ottakringPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1991441')
+
+waehringPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1990600')
+
+doeblingPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1991435')
+
+floridsdorfPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1991437')
+
+# josefstadtPoly <- wienBoundaries$osm_multipolygons %>% filter(osm_id == '240118849')
+```
+
+Because of a weird discrepancy between the type of projection of the OSM shapefile and Google Maps, you have to do a couple of transformations before you can map with ggmap. Help from [here](https://stackoverflow.com/a/50844502/7451811)!
+
+```{r How to map the area you get from OSM with sf}
+# Create list of dfs
+districts <- list(innerePoly, josefstadtPoly, ottakringPoly, waehringPoly, doeblingPoly, floridsdorfPoly)
+
+# Transform nc to EPSG 3857 (Pseudo-Mercator, what Google uses)
+districts_3857 <- lapply(districts, function(x) st_transform(x, 3857))
+
+# View(districts_3857[1])
+
+# ott_3857 <- st_transform(poly8th, 3857)
+# eigth_3857 <- st_transform(poly8th, 3857)
+
+# ott_map <- get_map("Ottakring Wien", zoom = 12, source = "google")
+# ott_map <- get_map("Josefstadt Wien", zoom = 13, source = "google")
+
+# Get a map of Vienna:
+wien_map <- get_map("Brigittenau Wien Austria", zoom = 11, source = "google")
+
+# Define a function to fix the bbox to be in EPSG:3857
+ggmap_bbox <- function(wien_map) {
+  if (!inherits(wien_map, "ggmap")) stop("map must be a ggmap object")
+  # Extract the bounding box (in lat/lon) from the ggmap to a numeric vector, 
+  # and set the names to what sf::st_bbox expects:
+  map_bbox <- setNames(unlist(attr(wien_map, "bb")), 
+                       c("ymin", "xmin", "ymax", "xmax"))
+
+  # Coonvert the bbox to an sf polygon, transform it to 3857, 
+  # and convert back to a bbox (convoluted, but it works)
+  bbox_3857 <- st_bbox(st_transform(st_as_sfc(st_bbox(map_bbox, crs = 4326)), 3857))
+
+  # Overwrite the bbox of the ggmap object with the transformed coordinates 
+  attr(wien_map, "bb")$ll.lat <- bbox_3857["ymin"]
+  attr(wien_map, "bb")$ll.lon <- bbox_3857["xmin"]
+  attr(wien_map, "bb")$ur.lat <- bbox_3857["ymax"]
+  attr(wien_map, "bb")$ur.lon <- bbox_3857["xmax"]
+  wien_map
+}
+
+# Use the function:
+wien_map <- ggmap_bbox(wien_map)
+
+ggmap(wien_map) + 
+  coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+  lapply(districts_3857, function(x) geom_sf(data = x, aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE)) 
+
+# Try to add label...
+# test <- st_transform(innerePoly, 3857)
+# ggmap(wien_map) + 
+#   coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+#   # geom_sf(data = test, aes(fill = name, alpha = 0.6)) + 
+#   geom_sf_text(aes(label = NAME))
+```
+
+## Filtering tweets based on boundaries + graphing!:
+
+To be able to see what tweets fall in the exact district borders, we'll use the st_intersects function. To do this we need to convert our latitute and longitude coordinates to an sf object first. 
+
+Help on using st_intersects from [here](https://gis.stackexchange.com/questions/282750/identify-polygon-containing-point-with-r-sf-package/318629#318629)!
+
+```{r}
+# First only keep records where we have a coordinate (bc st_as_sf doesn't like NAs!):
+districts_cords <- lapply(instaData, function(x) subset(x, (!is.na(x$lng)) & (!is.na(x$lat))))
+
+# ott_tweet_cords <- subset(ottarkring, (!is.na(ottarkring$lng)) & (!is.na(ottarkring$lat)))
+# innere_tweet_cords <- subset(instaOnlyinnere, (!is.na(instaOnlyinnere$lng)) & (!is.na(instaOnlyinnere$lat)))
+
+# Convert to sf object
+districts_cords_sf <- lapply(districts_cords, function(x) sf::st_as_sf(x, coords=c("lng","lat"), crs=4326))
+
+# ott_tweet_cords_sf <- sf::st_as_sf(ott_tweet_cords, coords=c("lng","lat"), crs=4326)
+# innere_tweet_cords_sf <- sf::st_as_sf(innere_tweet_cords, coords=c("lng","lat"), crs=4326)
+
+# Find the intersection between the two files
+districts_int <- mapply(function(x,y) sf::st_intersects(x, y), districts_cords_sf,districts)
+
+# ott_int <- sf::st_intersects(ott_tweet_cords_sf, ottakringPoly)
+# innere_int <- sf::st_intersects(innere_tweet_cords_sf, innerePoly)
+
+# Add this on as a column in the original data frames to tag them in/out
+# Had such a hard time with this, finally figured it out from here: https://stackoverflow.com/a/50949909/7451811
+districts_tagged <- Map(function(x, y) {
+  x$in_district <- as.character(y)
+  x
+},
+  districts_cords, 
+  districts_int)
+
+# ott_tweet_cords$in_district <- as.character(ott_int)
+# innere_tweet_cords$in_district <- as.character(innere_int)
+
+# Rename values so it's easier to read!
+districts_taggedII <- lapply(districts_tagged, function(x) dplyr::mutate(x, in_district = plyr::revalue(in_district, c("1" = "Yes","integer(0)" = "No"))))
+
+# ott_tweet_cords$in_district <- ott_tweet_cords$in_district %>%
+#   revalue(c("1" = "Yes","integer(0)" = "No"))
+# innere_tweet_cords$in_district <- innere_tweet_cords$in_district %>%
+#   revalue(c("1" = "Yes","integer(0)" = "No"))
+  
+# Subset to only in district:
+district_posts <- lapply(districts_taggedII, function(x) subset(x, x$in_district == 'Yes'))
+
+# ott_tweets <- subset(ott_tweet_cords, ott_tweet_cords$in_district == 'Yes')
+
+# Test!
+table(district_posts[[1]]$in_district)
+table(district_posts[[3]]$in_district)
+```
+
+## Creating layered maps
+
+To layer the tweet data on top of our district boundary, we need to convert it to the same Pseudo-Mercator format.
+
+
+```{r Map}
+# Subset to only in district:
+# ott_tweets <- subset(ott_tweet_cords, ott_tweet_cords$in_district == 'Yes')
+# innere_tweets <- subset(innere_tweet_cords, innere_tweet_cords$in_district == 'Yes')
+
+# Have to follow a similar protocol above I think to be able to map...
+
+# Convert to sf object
+
+# Step 1:
+district_posts_4326 <- lapply(district_posts, function(x) sf::st_as_sf(x, coords=c("lng","lat"), crs=4326))
+
+# Step 2:
+# Transform tweet dots to EPSG 3857 (Pseudo-Mercator, what Google uses)
+district_posts_3857 <- lapply(district_posts_4326, function(x) st_transform(x, 3857))
+# ott_tweets_4326 <- sf::st_as_sf(ott_tweets, coords=c("lng","lat"), crs=4326)
+
+# Transform ott tweet dots to EPSG 3857 (Pseudo-Mercator, what Google uses)
+# ott_tweets_3857 <- st_transform(ott_tweets_4326, 3857)
+
+# Try to layer:
+ggmap(wien_map) +
+  coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+  geom_sf(data = district_posts_3857[[2]], aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE) +
+  geom_sf(data = district_posts_3857[[3]], aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE) +
+  geom_sf(data = districts_3857[[2]], aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE) +
+  geom_sf(data = districts_3857[[3]], aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE)
+
+
+# Took too long (too big)
+# ggmap(wien_map) + 
+#   coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+#   lapply(district_posts_3857, function(x) geom_sf(data = x, aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE)) 
+
+# ggmap(ott_map) +
+#   coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+#   geom_sf(data = ott_3857, aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE) +
+#   geom_sf(data = ott_tweets_3857, aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE)
+```
+
+## Alternative method
+
+This is another straightforward method that gives you the district polygon in a different format. Actually works nicer than the above method because you can just use geom_path (very important to use geom_path because it follows the order of the points as they are presented, which means we get a nice boundary line!)
+
+Method to get the polygon from osmdata's vignette. 
+
+```{r Build query - test with Ottakring + map}
+# Get polygon of boundary...
+
+# List of places we want BBs for
+names <- list("Innere Stadt Wien", "Josefstadt Wien", "Ottakring Wien", "Währing Wien", "Floridsdorf, Wien")
+
+# "Döbling Wien"
+# Get bounding boxes
+bbs <- lapply(names, function(x) getbb(x, format_out = "polygon"))
+
+# Get lat and lons for these
+bbCoordsDFs <- lapply(bbs, function(x) data.frame(Longitude = as.vector(x[[1]][,1]), Latitude = as.vector(x[[1]][,2])))
+
+# Have to do this separately bc it's different
+döblingBB <- getbb("Döbling Wien", format_out = "polygon")
+döblingBBdf <- data.frame(Longitude = döblingBB[,1], Latitude = döblingBB[,2])
+
+# Add to list of dfs 
+allbbCoordsDFs <- c(list(döblingBBdf), bbCoordsDFs)
+
+# innerePolyBB <- getbb ("Innere Stadt Wien", format_out = "polygon")
+# ottakringPolyBB <- getbb ("Ottakring Wien", format_out = "polygon")
+# JosefstadtPolyBB <- getbb ("Josefstadt Wien", format_out = "polygon")
+# testBB <- getbb("Döbling Wien", format_out = "polygon")
+# 
+# View(data.frame(Longitude = testBB[,1], Latitude = testBB[,2]))
+
+# JosefstadtCoordsDF = data.frame(Longitude = as.vector(JosefstadtPolyBB[[1]][,1]), Latitude = as.vector(JosefstadtPolyBB[[1]][,2]))
+
+# instaOnlyinnere, eighthDistrictInsta, ottarkring, währing, döbling, instaOnly21
+
+# class (ottakring); head (ottakring [[1]])
+
+# lon <- as.vector(ottakring[[1]][,1])
+# lat <- as.vector(ottakring[[1]][,2])
+
+
+# Map to see if this actually works... kind of?
+
+# get_googlemap("Friedhof Wien Ottakring", zoom = 13) %>% ggmap() + geom_path(data = ottakringCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy')
+# 
+# get_googlemap("Innere Stadt Wien", zoom = 14) %>% ggmap() + geom_path(data = innereCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy')
+
+# MAP ALL THESE !
+get_googlemap("Brigittenau Wien Austria", zoom = 11) %>% ggmap() + lapply(allbbCoordsDFs, function(x) geom_path(data = x, aes(x = Longitude, y = Latitude), color = 'navy'))
+  
+  # data = ottakringCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy')
+
+```
+
+Now let's put this all together!
+
+```{r Combine with above work to filter out points that don't exist in the boundary}
+
+get_googlemap("Brigittenau Wien Austria", zoom = 11) %>% ggmap() + lapply(allbbCoordsDFs, function(x) geom_path(data = x, aes(x = Longitude, y = Latitude), color = 'navy')) +
+  lapply(district_posts, function(x) geom_point(data = x, aes(x = lng, y = lat), color = 'black', alpha = 0.5))
+
+
+# get_googlemap("Friedhof Wien Ottakring", zoom = 13) %>% ggmap() + 
+#   geom_path(data = ottakringCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy') +
+#   geom_point(data = ott_tweets, aes(x = lng, y = lat), color = 'black')
+# 
+# get_googlemap("Innere Stadt Wien", zoom = 14) %>% ggmap() + 
+#   geom_path(data = innereCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy') +
+#   geom_point(data = innere_tweets, aes(x = lng, y = lat), color = 'black', alpha = 0.5)
+# 
+# # All together
+# get_googlemap("Neulerchenfeld 1160 Vienna, Austria", zoom = 12) %>% ggmap() + 
+#   geom_path(data = ottakringCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy') +
+#   geom_point(data = ott_tweets, aes(x = lng, y = lat), color = 'black') +
+#   geom_path(data = innereCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy') +
+#   geom_point(data = innere_tweets, aes(x = lng, y = lat), color = 'black', alpha = 0.5)
+
+```
+
+
+```{r}
+JosefstadtPolyBB <- getbb ("Josefstadt Wien", format_out = "polygon")
+
+JosefstadtCoordsDF = data.frame(Longitude = as.vector(JosefstadtPolyBB[[1]][,1]), Latitude = as.vector(JosefstadtPolyBB[[1]][,2]))
+
+
+get_googlemap("Josefstadt Wien", zoom = 14) %>% ggmap() + 
+  geom_path(data = JosefstadtCoordsDF, aes(x = Longitude, y = Latitude), color = 'navy')
+
+```
+
+
+```{r}
+# Save to CSV the cut files
+
+allNames <- list("1 Innere Stadt", "8 Josefstadt", "16 Ottakring", "18 Währing", "19 Döbling", "21 Floridsdorf")
+
+# Save:
+library(rtweet)
+setwd("/Users/katelyons/Documents/ELLViA/Data/District Posts")
+
+mapply(function(x,y) save_as_csv(x, y, prepend_ids = TRUE, na = "", fileEncoding = "UTF-8"), district_posts, allNames)
+
+# Save as R Data:
+save(district_posts, file = 'District Posts.RData')
+# mapply(function(x,y) save(x, file = paste(y, ".RData", sep = "")), district_posts, allNames)
+
+# save_as_csv(innere_tweets, '1st District Bounded Instagram', prepend_ids = TRUE, na = "", fileEncoding = "UTF-8")
+# 
+# setwd("/Users/katelyons/Documents/ELLViA/Data/16th District")
+# save_as_csv(ott_tweets, '16th District Bounded Instagram', prepend_ids = TRUE, na = "", fileEncoding = "UTF-8")
+# 
+# dfchunk[[1]]
+# district_posts
+```
+
+
+```{r}
+# # Try to fix encoding issue...
+# 
+# # split innere_tweets in two
+# n <- 2
+# dfchunk <- split(innere_tweets, factor(sort(rank(row.names(innere_tweets))%%n)))
+# 
+# save_as_csv(dfchunk[[1]], '1st District Bounded Instagram I', prepend_ids = TRUE, na = "", fileEncoding = "UTF-8")
+# 
+# save_as_csv(dfchunk[[2]], '1st District Bounded Instagram II', prepend_ids = TRUE, na = "", fileEncoding = "UTF-8")
+
+```

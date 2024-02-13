@@ -1,0 +1,180 @@
+---
+title: "ellvia_maps"
+author: "Kate Lyons"
+date: "2/24/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Creating nice maps of ELLViA Instagram data
+
+```{r Load in libraries}
+# Make sure you have the right packages!
+packs = c("tidyverse","tidytext","stringr","ggplot2","ggmap",
+          "scales","ggrepel","lubridate","purrr","broom", "tidylo", "fuzzyjoin",
+          "sf", "osmdata", "osmar", "prettymapr", "sp", "splancs", "rgeos",
+          "rgdal", "tmap", "geojsonR")
+lapply(packs, library, character.only=T)
+```
+
+```{r Load in data}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd('..')
+district_unigram_wlo <- read.csv("data/processed/district_unigram_wlo.csv")
+district_unigram_freq <- read.csv("data/processed/district_unigram_freq.csv")
+```
+
+```{r Get map}
+# Set up Google Maps API stuff:
+register_google(key = "AIzaSyCTlb6z8LgAxNrx6565KuSoUm1HogxkmKE")
+
+# Get wien map!
+wien_map <- get_map("Brigittenau Wien Austria", zoom = 11, source = "google")
+ggmap(wien_map)
+```
+
+```{r Put wlo on map!}
+# Map!!
+district_unigram_wlo$lng<-as.numeric(district_unigram_wlo$lng)
+district_unigram_wlo$lat<-as.numeric(district_unigram_wlo$lat)
+lon <- district_unigram_wlo$lng
+lat <- district_unigram_wlo$lat
+
+ggmap(wien_map) + geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_label_repel(data = district_unigram_wlo, aes(x = lon, y = lat, label = unigrams),
+  size = 3, max.overlaps = getOption("ggrepel.max.overlaps", default = 150)) 
+
+```
+
+```{r Put freq on map!}
+# Map!!
+district_unigram_freq$lng<-as.numeric(district_unigram_freq$lng)
+district_unigram_freq$lat<-as.numeric(district_unigram_freq$lat)
+lon <- district_unigram_freq$lng
+lat <- district_unigram_freq$lat
+
+ggmap(wien_map) + geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_label_repel(data = district_unigram_freq, aes(x = lon, y = lat, label = unigrams), size = 3, max.overlaps = getOption("ggrepel.max.overlaps", default = 150)) 
+
+```
+
+```{r Check Mission data for counts - get data}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd('..')
+terr <- read.csv("data/raw/mission_data/9_March_Mission_Data.csv")
+insta <- read.csv("data/raw/mission_data/Col_Sep_INSTACORPUS.csv")
+```
+
+```{r Check Mission data for counts - fuzzyjoin}
+pairsdf <- terr %>%
+  geo_inner_join(insta, unit='km',distance_col="distance", max_dist = "0.018288")
+
+# How much overlap?
+pairsdf %>% n_distinct('SIGN_ID', na.rm=TRUE)
+terr %>% n_distinct('SIGN_ID') # 1031
+View(pairsdf%>% select('SIGN_ID') %>% distinct())
+```
+
+
+Going to use the OSM API to grab spatial data on the region and subset to the specific district we want using the OSM ID field. Help on this from [here](https://altran-data-analytics.netlify.app/2017/10/10/2017-10-10-creating-maps-with-r-and-openstreetmap/).
+
+The method of retrival / processing depends on if they have the ability to be converted to an sf object. If the district is in OSM as a boundary object, we can grab the polygon directly, if it's just there as a bounding box, we have to covert ourselves another way. 
+```{r Get OSM boundaries}
+# Start at the admin level!
+wien9Boundaries <- opq(bbox = 'Wien Austria') %>%
+  add_osm_feature(key = 'admin_level', value = '9') %>% 
+  osmdata_sf %>% unique_osmdata
+
+# Now break down into districts:
+# Subset to area of interest for testing
+
+innerePoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1990592')
+
+josefstadtPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1990593')
+
+ottakringPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1991441')
+
+waehringPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1990600')
+
+doeblingPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1991435')
+
+floridsdorfPoly <- wien9Boundaries$osm_multipolygons %>% filter(osm_id == '1991437')
+```
+
+Because of a weird discrepancy between the type of projection of the OSM shapefile and Google Maps, you have to do a couple of transformations before you can map with ggmap. Help from [here](https://stackoverflow.com/a/50844502/7451811)!
+
+```{r How to map the area you get from OSM with sf}
+# Create list of dfs
+districts <- list(innerePoly, josefstadtPoly, ottakringPoly, waehringPoly, doeblingPoly, floridsdorfPoly)
+
+# Transform nc to EPSG 3857 (Pseudo-Mercator, what Google uses)
+districts_3857 <- lapply(districts, function(x) st_transform(x, 3857))
+
+# Get a map of Vienna:
+wien_map <- get_map("Brigittenau Wien Austria", zoom = 11, source = "google")
+
+# Define a function to fix the bbox to be in EPSG:3857
+ggmap_bbox <- function(wien_map) {
+  if (!inherits(wien_map, "ggmap")) stop("map must be a ggmap object")
+  # Extract the bounding box (in lat/lon) from the ggmap to a numeric vector, 
+  # and set the names to what sf::st_bbox expects:
+  map_bbox <- setNames(unlist(attr(wien_map, "bb")), 
+                       c("ymin", "xmin", "ymax", "xmax"))
+
+  # Coonvert the bbox to an sf polygon, transform it to 3857, 
+  # and convert back to a bbox (convoluted, but it works)
+  bbox_3857 <- st_bbox(st_transform(st_as_sfc(st_bbox(map_bbox, crs = 4326)), 3857))
+
+  # Overwrite the bbox of the ggmap object with the transformed coordinates 
+  attr(wien_map, "bb")$ll.lat <- bbox_3857["ymin"]
+  attr(wien_map, "bb")$ll.lon <- bbox_3857["xmin"]
+  attr(wien_map, "bb")$ur.lat <- bbox_3857["ymax"]
+  attr(wien_map, "bb")$ur.lon <- bbox_3857["xmax"]
+  wien_map
+}
+
+# Use the function:
+wien_map <- ggmap_bbox(wien_map)
+
+ggmap(wien_map) + 
+  coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+  lapply(districts_3857, function(x) geom_sf(data = x, aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE))
+```
+
+```{r Layering maps}
+# Convert data to sf object
+
+# Step 1:
+district_unigram_wlo_4326 <- sf::st_as_sf(district_unigram_wlo, coords=c("lng","lat"), crs=4326)
+  
+# Step 2:
+# Transform tweet dots to EPSG 3857 (Pseudo-Mercator, what Google uses)
+district_unigram_wlo_3857 <- st_transform(district_unigram_wlo_4326, 3857)
+
+# Layer?
+ggmap(wien_map) + 
+  coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+  lapply(districts_3857, function(x) geom_sf(data = x, aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE)) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_label_repel(data = district_unigram_wlo_3857, aes(label = unigrams), size = 3, max.overlaps = getOption("ggrepel.max.overlaps", default = 150))
+                   
+#                    aes(x = lng, y = lat, label = unigrams), size = 3, max.overlaps = getOption("ggrepel.max.overlaps", default = 150)) 
+# 
+# View(district_unigram_wlo_3857)
+  
+
+ggmap(wien_map) + 
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.25, height = 0.25) +
+  geom_label_repel(data = district_unigram_wlo, aes(x = lon, y = lat, label = unigrams), size = 3, max.overlaps = getOption("ggrepel.max.overlaps", default = 150)) 
+
+  coord_sf(crs = st_crs(3857)) + # force the ggplot2 map to be in 3857
+  lapply(districts_3857, function(x) geom_sf(data = x, aes(fill = name, alpha = 0.6), inherit.aes = FALSE, show.legend = FALSE)) 
+  
+  
+
+```
