@@ -13,6 +13,7 @@ __pycache__/*
 .*.swp
 */.ipynb_checkpoints/*
 .DS_Store
+.Rhistory
 
 # Project files
 .ropeproject
@@ -52,3 +53,8 @@ MANIFEST
 .venv*/
 .conda*/
 .python-version
+
+# Specific project directories
+drafts/
+docs/
+data/
